@@ -180,7 +180,7 @@ class Transformer(nn.Module):
 def main():
     opt_config = {
             "name":'opt-1.3',
-            "max_seq_len": 2048,
+            "max_seq_len": 24,
             "num_hidden_layers":24, 
             "n_head":32,
             "hidden_size":512, #2048
@@ -288,75 +288,133 @@ OutputEmbd
                 continue 
             v.to(device)
 
-    for i in range(opt_config["max_seq_len"]):
-        act_home = torch.empty(opt_config["num_gpu_batches"], opt_config["gpu_batch_size"], opt_config["prompt_len"], opt_config["input_dim"])
+    #### PREFILL
+    for j in range(opt_config["num_hidden_layers"]):
+        move_weights(all_weights[j], "cpu")
+        for k in range(opt_config["num_gpu_batches"]):
+            if j != 0:
+                x = act_home[k]
+            else:
+                x = transformer.input_embed(batches[k])
+                print(f"x = {x.shape}")
+            print(j)
+            K = all_weights[j]["weight_k"](x)
+            Q = all_weights[j]["weight_q"](x)
+            V = all_weights[j]["weight_v"](x)
+            
+            atten_map, _ = transformer.transformer_layers[j].mha(Q,K,V, need_weights=False)
+            #move_weights(atten_map, "cuda: 0")
+
+            k_home[j][k] = K
+            v_home[j][k] = V
+
+            #send atten_map, x, MLP layer to GPU for MLP stuff 
+            activation = transformer.transformer_layers[j].mlp(atten_map)
+            print(f"activation_shape : {activation.shape}")
+            act_home[k] = activation
+
+    # for activations in act_home:
+    x = transformer.out_linear(act_home)
+    probs = nn.Softmax()(x)
+    print(probs.shape)
+    ### Kind of stuck here, dont know how to get the predicted token to add to the batches for next iter. 
+    ##### Getting output of size (8,16,32) so for every input getting a list of [32 numbers]
+    # Get the argmax along the vocabulary dimension (-1)
+    output_ids = torch.argmax(probs, dim=-1)
+    print(output_ids.shape)
+    # # output_ids should have shape (8, 16, 32)
+    new_batches = []
+    for batch_idx, batch in enumerate(batches):
+        batch_with_new_tokens = torch.cat((batch, output_ids[batch_idx][:,-1].unsqueeze(-1)), dim=1)
+        new_batches.append(batch_with_new_tokens)
+
+    batches = new_batches
+        
+    print(batches[0][0])
+    
+        #### DECODE
+    print("--------------------------------DECODE----------------------------------")
+    x_shape, k_shape, v_shape, act_shape=0,0,0,0
+
+    for i in range(1, opt_config["max_seq_len"]):
+        # print(f"i={i}")
+        act_home = torch.empty(opt_config["num_gpu_batches"], opt_config["gpu_batch_size"], 1, opt_config["input_dim"])
+        k_new = torch.empty(opt_config["num_hidden_layers"], opt_config["num_gpu_batches"], opt_config["gpu_batch_size"], opt_config["prompt_len"] + i, opt_config["input_dim"])
+        v_new = torch.empty(opt_config["num_hidden_layers"], opt_config["num_gpu_batches"], opt_config["gpu_batch_size"], opt_config["prompt_len"] + i, opt_config["input_dim"])
+        # print("act_home, k_new, v_new initialized")
         for j in range(opt_config["num_hidden_layers"]):
             move_weights(all_weights[j], "cpu")
             for k in range(opt_config["num_gpu_batches"]):
                 if j != 0:
                     x = act_home[k]
+                    x_shape = x.shape
+                    # print(f"x shape when j={j}: {x.shape}")
                 else:
-                    x = transformer.input_embed(batches[k])
-                print(j)
+                    # x = transformer.input_embed(batches[k])
+                    x = batches[k][:, -1].view(-1,1)
+                    # print(f"x shape : {x.shape}")
+                    # print(f"x  : {x}")
+                    x = transformer.input_embed(x)
+                    x_shape = x.shape
+                    # print(f"x shape when j={j}: {x.shape}")
+                    # print(f"x shape : {x.shape}")
+
+                print(f"-------{j}-------")
                 K = all_weights[j]["weight_k"](x)
                 Q = all_weights[j]["weight_q"](x)
                 V = all_weights[j]["weight_v"](x)
-                if i > 0:
+                k_shape = K.shape
+                v_shape = V.shape
+                if j == 0:
                     old_k = k_home[j][k]
                     old_v = v_home[j][k]
-                    K = torch.cat((old_k, K), dim=-1)
-                    V = torch.cat((old_v, V), dim=-1)
+                    
+                    # print(f"this K : {K.shape}")
+                    K = torch.cat((old_k, K), dim=1)
+                    V = torch.cat((old_v, V), dim=1)
+                    k_shape = K.shape
+                    v_shape = V.shape
+                # print(f"old_k : {old_k.shape} for j={j}")
+                # print(f"K : {K.shape} for j={j}")
                 atten_map, _ = transformer.transformer_layers[j].mha(Q,K,V, need_weights=False)
                 #move_weights(atten_map, "cuda: 0")
-
-                k_home[j][k] = K
-                v_home[j][k] = V
+                # print(f"k shape when j={j}: {K.shape}")
+                k_new[j][k] = K
+                v_new[j][k] = V
 
                 #send atten_map, x, MLP layer to GPU for MLP stuff 
                 activation = transformer.transformer_layers[j].mlp(atten_map)
-                print(activation.shape)
+                act_shape = activation.shape
+                # print(f"activation_shape : {activation.shape}")
                 act_home[k] = activation
+                # print(act_home[k].shape)
+            
+        k_home, v_home = k_new, v_new
+
 
         # for activations in act_home:
         x = transformer.out_linear(act_home)
         probs = nn.Softmax()(x)
-
+        print(f"probs : {probs.shape}")
         ### Kind of stuck here, dont know how to get the predicted token to add to the batches for next iter. 
         ##### Getting output of size (8,16,32) so for every input getting a list of [32 numbers]
         # Get the argmax along the vocabulary dimension (-1)
         output_ids = torch.argmax(probs, dim=-1)
-        print(output_ids.shape)
+        print(f"output_ids : {output_ids.shape}")
         # # output_ids should have shape (8, 16, 32)
-        # new_batches = []
-        # for batch_idx, batch in enumerate(batches):
-        #     batch_with_new_tokens = torch.cat((batch, output_ids[batch_idx]), dim=1)
-        #     new_batches.append(batch_with_new_tokens)
+        new_batches = []
+        for batch_idx, batch in enumerate(batches):
+            batch_with_new_tokens = torch.cat((batch, output_ids[batch_idx][:,-1].unsqueeze(-1)), dim=1)
+            new_batches.append(batch_with_new_tokens)
 
-        # batches = new_batches
-            
-        print(batches[0][0])
-        
-        break
-            # attention_map = torch.matmul(q, torch.transpose(k, 0, 1)) ## Make sure transpose return the correct dim
-            # sm_normalized_attention_map = nn.Softmax()(attention_map / (self.d_internal ** 0.5))
-            # h = torch.matmul(sm_normalized_attention_map, v)
-            #atten_score = compute_mha(w_k, w_q, w_v, x)
-## This is for getting the word
-# Concatenate the sequences in each batch
-        # concatenated_output_ids = []
-        # for batch_ids in output_ids:
-        #     batch_sequences = []
-        #     for sequence_ids in batch_ids:
-        #         sequence_text = tokenizer.decode(sequence_ids, skip_special_tokens=True)
-        #         batch_sequences.append(sequence_text)
-        #     concatenated_output_ids.append(batch_sequences)
-
-        # Now, concatenated_output_ids is a list of lists
-        # The outer list represents the batches
-        # The inner lists represent the predicted text for each sequence in the batch
-
-        # print(concatenated_output_ids)
-
+        batches = new_batches
+        print(f"token {i} generated")
+    print(f"batches: {len(batches)}, {len(batches[1])}")
+    print(f"batches: {batches[0][0]}")
+    print(k_home.shape)
+        # print(batches[0][0])
+    
+    
 
 
 if __name__ == "__main__":
