@@ -27,3 +27,11 @@ Experiments were conducted using the OPT-1.3B language model on Google Colab. Th
 
 ## Conclusion
 FlexGen offers an optimized way to run highly batched high-throughput inference jobs on single GPU setups. This project enhances understanding of systems and large language models, especially for production model serving and inference pipelines.
+
+
+## References
+[FlexGen GitHub Repository](https://github.com/FMInference/FlexGen)  
+
+[BitsAndBytes GitHub Repository](https://github.com/TimDettmers/bitsandbytes)
+
+[Scalene GitHub Repository](https://github.com/plasma-umass/scalene)
